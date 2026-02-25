@@ -1,0 +1,12 @@
+requests
+httpx
+google
+protobuf
+pycryptodome
+psutil
+PyJWT
+urllib3
+protobuf-decoder
+pytz
+aiohttp
+cfonts
