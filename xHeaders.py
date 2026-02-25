@@ -1,15 +1,224 @@
-# Encrypted by Advanced Builder
-# Python Version: 3.12.12
+import requests , os , psutil , sys , jwt , pickle , json , binascii , time , urllib3 , base64 , datetime , re ,socket , threading
+from protobuf_decoder.protobuf_decoder import Parser
+from xC4 import *
+from datetime import datetime
+from google.protobuf.timestamp_pb2 import Timestamp
+from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
 
-import marshal, zlib, base64, sys
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) 
 
-try:
-    # Payload
-    _data = b'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'
+def ToK():
+    while True:
+        try:
+            r = requests.get('https://tokens-asfufvfshnfkhvbb.francecentral-01.azurewebsites.net/ReQuesT?&type=ToKens')
+            t = r.text
+            i = t.find("ToKens : [")
+            if i != -1:
+                j = t.find("]", i)
+                L = [x.strip(" '\"") for x in t[i+11:j].split(',') if x.strip()]
+                if L:
+                    with open("token.txt", "w") as f:
+                        f.write(random.choice(L))
+        except: pass
+        time.sleep(5 * 60 * 60)
+
+Thread(target=ToK , daemon = True).start()
+
+
+
+def equie_emote(JWT,url):
+    url = f"{url}/ChooseEmote"
+
+    headers = {
+        "Accept-Encoding": "gzip",
+        "Authorization": f"Bearer {JWT}",
+        "Connection": "Keep-Alive",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Expect": "100-continue",
+        #"Host": "clientbp.ggblueshark.com",
+        "ReleaseVersion": "OB51",
+        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; G011A Build/PI)",
+        "X-GA": "v1 1",
+        "X-Unity-Version": "2018.4.11f1",
+    }
+
+    data = bytes.fromhex("CA F6 83 22 2A 25 C7 BE FE B5 1F 59 54 4D B3 13")
+
+    requests.post(url, headers=headers, data=data)
+
+
+
+
+
+def GeTToK():  
+    with open("token.txt") as f: return f.read().strip()
     
-    # Execution Logic
-    exec(marshal.loads(zlib.decompress(base64.b64decode(_data))), globals())
+def Likes(id):
+    try:
+        text = requests.get(f"https://tokens-asfufvfshnfkhvbb.francecentral-01.azurewebsites.net/ReQuesT?id={id}&type=likes").text
+        get = lambda p: re.search(p, text)
+        name, lvl, exp, lb, la, lg = (get(r).group(1) if get(r) else None for r in 
+            [r"PLayer NamE\s*:\s*(.+)", r"PLayer SerVer\s*:\s*(.+)", r"Exp\s*:\s*(\d+)", 
+             r"LiKes BeFore\s*:\s*(\d+)", r"LiKes After\s*:\s*(\d+)", r"LiKes GiVen\s*:\s*(\d+)"])
+        return name , f"{lvl}" if lvl else None, int(lb) if lb else None, int(la) if la else None, int(lg) if lg else None
+    except: return None, None, None, None, None
     
-except Exception as e:
-    print("Error executing encrypted code:", e)
-    sys.exit(1)
+def Requests_SPam(id):
+    Api = requests.get(f'https://tokens-asfufvfshnfkhvbb.francecentral-01.azurewebsites.net/ReQuesT?id={id}&type=spam')        
+    if Api.status_code in [200, 201] and '[SuccessFuLy] -> SenDinG Spam ReQuesTs !' in Api.text: return True
+    else: return False
+
+def GeT_Name(uid , Token):
+    data = bytes.fromhex(EnC_AEs(f"08{EnC_Uid(uid , Tp = 'Uid')}1007"))
+    url = "https://clientbp.common.ggbluefox.com/GetPlayerPersonalShow"
+    headers = {
+        'X-Unity-Version': '2018.4.11f1',
+        'ReleaseVersion': 'OB51',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-GA': 'v1 1',
+        'Authorization': f'Bearer {GeTToK()}',
+        'Content-Length': '16',
+        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 7.1.2; ASUS_Z01QD Build/QKQ1.190825.002)',
+        'Host': 'clientbp.ggblueshark.com',
+        'Connection': 'Keep-Alive',
+        'Accept-Encoding': 'gzip'
+    }
+    response = requests.post(url , headers=headers , data=data ,verify=False)
+    if response.status_code == 200 or 201:
+        packet = binascii.hexlify(response.content).decode('utf-8')
+        BesTo_data = json.loads(DeCode_PackEt(packet))      
+        try:
+            a1 = BesTo_data["1"]["data"]["3"]["data"]
+            return a1
+        except: return ''  
+    else: return ''
+            	  	
+def GeT_PLayer_InFo(uid , Token):
+    data = bytes.fromhex(EnC_AEs(f"08{EnC_Uid(uid , Tp = 'Uid')}1007"))
+    url = "https://clientbp.common.ggbluefox.com/GetPlayerPersonalShow"
+    headers = {
+        'X-Unity-Version': '2018.4.11f1',
+        'ReleaseVersion': 'OB51',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-GA': 'v1 1',
+        'Authorization': f'Bearer {GeTToK()}',
+        'Content-Length': '16',
+        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 7.1.2; ASUS_Z01QD Build/QKQ1.190825.002)',
+        'Host': 'clientbp.ggblueshark.com',
+        'Connection': 'Keep-Alive',
+        'Accept-Encoding': 'gzip'}
+    response = requests.post(url , headers=headers , data=data ,verify=False)
+    if response.status_code == 200 or 201:
+        packet = binascii.hexlify(response.content).decode('utf-8')
+        BesTo_data =  json.loads(DeCode_PackEt(packet))
+        NoCLan = False   
+        try:        
+            a1 = str(BesTo_data["1"]["data"]["1"]["data"])
+            a2 = BesTo_data["1"]["data"]["21"]["data"]
+            a3 = BesTo_data["1"]["data"]["3"]["data"]
+            player_server = BesTo_data["1"]["data"]["5"]["data"]
+            player_bio = BesTo_data["9"]["data"]["9"]["data"]
+            player_level = BesTo_data["1"]["data"]["6"]["data"]
+            account_date = datetime.fromtimestamp(BesTo_data["1"]["data"]["44"]["data"]).strftime("%I:%M %p - %d/%m/%y")
+            last_login = datetime.fromtimestamp(BesTo_data["1"]["data"]["24"]["data"]).strftime("%I:%M %p - %d/%m/%y")
+            try:
+                clan_id = BesTo_data["6"]["data"]["1"]["data"]
+                clan_name = BesTo_data["6"]["data"]["2"]["data"]
+                clan_leader = BesTo_data["6"]["data"]["3"]["data"]
+                clan_level = BesTo_data["6"]["data"]["4"]["data"]
+                clan_members_num = BesTo_data["6"]["data"]["6"]["data"]
+                clan_leader_name = BesTo_data["7"]["data"]["3"]["data"]                       
+            except:
+                NoCLan = True
+            if NoCLan:
+            	a = f'''
+[b][c][90EE90] [SuccessFully] - Get PLayer s'InFo !
+
+[FFFF00][1] - ProFile InFo :
+[ffffff]	
+ Name : {a3}
+ Uid : {xMsGFixinG(a1)}
+ Likes : {xMsGFixinG(a2)}
+ LeveL : {player_level}
+ Server : {player_server}
+ Bio : {player_bio}
+ Creating : {account_date}
+ LasT LoGin : {last_login}
+ 
+  [90EE90]Dev : BLACK_APIs\n'''            
+            	a = a.replace('[i]','')
+            	return a
+            	  	            	            
+            else:            	          	                        
+            	a = f'''
+[b][c][90EE90] [SuccessFully] - Get PLayer s'InFo !
+
+[FFFF00][1] - ProFile InFo :
+[ffffff]	
+ Name : {a3}
+ Uid : {xMsGFixinG(a1)}
+ Likes : {xMsGFixinG(a2)}
+ LeveL : {player_level}
+ Server : {player_server}
+ Bio : {player_bio}
+ Creating : {account_date}
+ LasT LoGin : {last_login}
+
+[b][c][FFFF00][2] - Guild InFo :
+[ffffff]
+ Guild Name : {clan_name}
+ Guild Uid : {xMsGFixinG(clan_id)}
+ Guild LeveL : {clan_level}
+ Guild Members : {clan_members_num}
+ Leader s'Uid : {xMsGFixinG(clan_leader)}
+ Leader s'Name : {clan_leader_name}
+
+  [90EE90]Dev : BLACK_APIs\n'''	
+            	a = a.replace('[i]','')    
+            	return a
+                                       
+        except Exception as e:
+           return f'\n[b][c][FFD700]FaiLEd GeTinG PLayer InFo !\n'
+    else:
+        return f'\n[b][c][FFD700]FaiLEd GeTinG PLayer InFo !\n'
+    
+def DeLet_Uid(id , Tok):
+    print(f' Done FuckinG > {id} ')
+    url = 'https://clientbp.common.ggbluefox.com/RemoveFriend'
+    headers = {
+        'X-Unity-Version': '2018.4.11f1',
+        'ReleaseVersion': 'OB51',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-GA': 'v1 1',
+        'Authorization': f'Bearer {Tok}',
+        'Content-Length': '16',
+        'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 7.1.2; ASUS_Z01QD Build/QKQ1.190825.002)',
+        'Host': 'clientbp.ggblueshark.com',
+        'Connection': 'Keep-Alive',
+        'Accept-Encoding': 'gzip'}
+    data = bytes.fromhex(EnC_AEs(f"08a7c4839f1e10{EnC_Uid(id , Tp = 'Uid')}"))
+    ResPonse = requests.post(url , headers=headers , data=data , verify=False)    
+    if ResPonse.status_code == 400 and 'BR_FRIEND_NOT_SAME_REGION' in ResPonse.text:
+        return f'[b][c]Id : {xMsGFixinG(id)} Not In Same Region !'
+    elif ResPonse.status_code == 200:
+        return f'[b][c]Good Response Done Delete Id : {xMsGFixinG(id)} !'
+    else:
+        return f'[b][c]Erorr !'
+                                                        
+def ChEck_The_Uid(id):
+    Api = requests.get("https://panel-g2ccathtf6gdcmdw.polandcentral-01.azurewebsites.net/Uids")
+    if Api.status_code not in [200, 201]: 
+        return False    
+    lines = Api.text.splitlines()    
+    for i, line in enumerate(lines):
+        if f' - Uid : {id}' in line:
+            expire, status = None, None
+            for sub_line in lines[i:]:
+                if "Expire In" in sub_line: 
+                    expire = re.search(r"Expire In\s*:\s*(.*)", sub_line).group(1).strip()
+                if "Status" in sub_line: 
+                    status = re.search(r"Status\s*:\s*(\w+)", sub_line).group(1)
+                if expire and status: return status, expire
+            return False
+    return False
