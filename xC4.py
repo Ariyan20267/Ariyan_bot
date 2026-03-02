@@ -408,15 +408,25 @@ async def Emote_k(TarGeT , idT, K, V,region):
 #EMOTES BY PARAHEX X CODEX
 
 
+
 async def GeTSQDaTa(D):
-    uid = D['5']['data']['1']['data']
-    chat_code = D["5"]["data"]["17"]["data"]
-    squad_code = D["5"]["data"]["31"]["data"]
+    try:
+        root = D.get("5", {}).get("data", {})
+        if not root:
+            return None
 
+        uid = root.get("1", {}).get("data")
+        chat_code = root.get("17", {}).get("data")
+        squad_code = root.get("31", {}).get("data")
 
-    return uid, chat_code , squad_code
+        if not uid:
+            return None
 
-  
+        return uid, chat_code, squad_code
+
+    except Exception as e:
+        print("⚠ Safe SQDATA ERROR:", e)
+        return None
 async def AuthClan(CLan_Uid, AuTh, K, V):
     fields = {1: 3, 2: {1: int(CLan_Uid), 2: 1, 4: str(AuTh)}}
     return await GeneRaTePk((await CrEaTe_ProTo(fields)).hex() , '1201' , K , V)
@@ -997,15 +1007,25 @@ async def Emote_k(TarGeT , idT, K, V,region):
 #EMOTES BY PARAHEX X CODEX
 
 
+
 async def GeTSQDaTa(D):
-    uid = D['5']['data']['1']['data']
-    chat_code = D["5"]["data"]["17"]["data"]
-    squad_code = D["5"]["data"]["31"]["data"]
+    try:
+        root = D.get("5", {}).get("data", {})
+        if not root:
+            return None
 
+        uid = root.get("1", {}).get("data")
+        chat_code = root.get("17", {}).get("data")
+        squad_code = root.get("31", {}).get("data")
 
-    return uid, chat_code , squad_code
+        if not uid:
+            return None
 
-  
+        return uid, chat_code, squad_code
+
+    except Exception as e:
+        print("⚠ Safe SQDATA ERROR:", e)
+        return None
 async def AuthClan(CLan_Uid, AuTh, K, V):
     fields = {1: 3, 2: {1: int(CLan_Uid), 2: 1, 4: str(AuTh)}}
     return await GeneRaTePk((await CrEaTe_ProTo(fields)).hex() , '1201' , K , V)
