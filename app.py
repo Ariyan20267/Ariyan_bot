@@ -1,773 +1,528 @@
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
+import requests, os, psutil, sys, jwt, pickle, json, binascii, time, urllib3, xKEys, base64, re, socket, threading
 import asyncio
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
-import binascii
-import aiohttp
-import json
-import like_pb2
-import like_count_pb2
-import uid_generator_pb2
-import sqlite3
-import urllib3
+from protobuf_decoder.protobuf_decoder import Parser
+from byte import *
+from byte import xSEndMsg
+from byte import Auth_Chat
+from xHeaders import *
 from datetime import datetime
-import os
+from google.protobuf.timestamp_pb2 import Timestamp
+from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
+from flask import Flask, request, jsonify
+from black9 import openroom, spmroom
 
-# ---------- কনফিগারেশন ----------
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-DATABASE = 'ariyan_likes.db'
-ADMIN_USERNAME = 'ARIYAN'
-ADMIN_PASSWORD = 'nobita@#$321'
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  
 
-# আপনার টোকেন জেনারেটর স্ক্রিপ্ট যেই ফাইলগুলোতে টোকেন সেভ করবে তার নাম
-TOKEN_FILES = {
-    'BD': 'account_bd.json',
-    'IND': 'account_ind.json',
-    'BR': 'account_br.json',
-    'US': 'account_us.json',
-    'SAC': 'account_sac.json',
-    'NA': 'account_na.json'
-}
+connected_clients = {}
+connected_clients_lock = threading.Lock()
 
-# ---------- ডাটাবেস সেটআপ ----------
-def init_db():
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    # ডেইলি লাইক লিমিট ট্র্যাক করার জন্য
-    c.execute('''CREATE TABLE IF NOT EXISTS daily_limits
-                 (uid TEXT PRIMARY KEY, last_date TEXT)''')
-    # অ্যাডমিনকে দেখানোর জন্য কে কে লাইক নিলো তার হিস্ট্রি
-    c.execute('''CREATE TABLE IF NOT EXISTS like_history
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  uid TEXT, server TEXT, increment INTEGER, date_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    # অ্যাডমিন প্যানেল থেকে বট একাউন্ট (গেস্ট) সেভ করার জন্য
-    c.execute('''CREATE TABLE IF NOT EXISTS bot_accounts
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  uid TEXT UNIQUE, password TEXT)''')
-    conn.commit()
-    conn.close()
-    export_bots_to_txt() # স্টার্ট হওয়ার সময় account.txt আপডেট করবে
+active_spam_targets = {}
+active_spam_lock = threading.Lock()
 
-def check_daily_limit(uid):
-    today = datetime.now().strftime('%Y-%m-%d')
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("SELECT last_date FROM daily_limits WHERE uid=?", (uid,))
-    row = c.fetchone()
-    conn.close()
-    if row and row[0] == today:
-        return False # আজকে নিয়ে নিয়েছে
-    return True # আজকে নিতে পারবে
-
-def update_daily_limit(uid):
-    today = datetime.now().strftime('%Y-%m-%d')
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO daily_limits (uid, last_date) VALUES (?, ?)", (uid, today))
-    conn.commit()
-    conn.close()
-
-def log_like_history(uid, server, increment):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("INSERT INTO like_history (uid, server, increment) VALUES (?, ?, ?)", (uid, server, increment))
-    conn.commit()
-    conn.close()
-
-def get_today_history():
-    today = datetime.now().strftime('%Y-%m-%d')
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("SELECT uid, server, increment, date_time FROM like_history WHERE date_time LIKE ? ORDER BY id DESC", (f"{today}%",))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-# ---------- বট একাউন্ট ম্যানেজমেন্ট ----------
-def export_bots_to_txt():
-    """বট একাউন্টগুলো account.txt ফাইলে সেভ করে যাতে token_generator.py ব্যবহার করতে পারে"""
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("SELECT uid, password FROM bot_accounts")
-    rows = c.fetchall()
-    conn.close()
-    try:
-        with open('account.txt', 'w', encoding='utf-8') as f:
-            for row in rows:
-                f.write(f"{row[0]}:{row[1]}\n")
-    except Exception as e:
-        print("Error saving account.txt:", e)
-
-def add_bot_account(uid, password):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO bot_accounts (uid, password) VALUES (?, ?)", (uid, password))
-        conn.commit()
-    except:
-        pass # Already exists
-    conn.close()
-    export_bots_to_txt()
-
-def get_all_bots():
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("SELECT id, uid, password FROM bot_accounts")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def delete_bot(bot_id):
-    conn = sqlite3.connect(DATABASE)
-    c = conn.cursor()
-    c.execute("DELETE FROM bot_accounts WHERE id=?", (bot_id,))
-    conn.commit()
-    conn.close()
-    export_bots_to_txt()
-
-# ---------- টোকেন লোডিং (লোকাল ফাইল থেকে) ----------
-def load_tokens_from_file(server_name):
-    if server_name not in TOKEN_FILES:
-        return []
-    path = TOKEN_FILES[server_name]
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            # JSON array format: [{"token": "eyJ..."}, ...]
-            return [item['token'] for item in data if 'token' in item]
-    except Exception:
-        return []
-
-# ---------- এনক্রিপশন ও প্রোটোবাফ ----------
-def encrypt_message(plaintext):
-    key = b'Yg&tc%DEuh6%Zc^8'
-    iv = b'6oyZDr22E3ychjM%'
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    padded_message = pad(plaintext, AES.block_size)
-    encrypted_message = cipher.encrypt(padded_message)
-    return binascii.hexlify(encrypted_message).decode('utf-8')
-
-def create_protobuf_message(user_id, region):
-    message = like_pb2.like()
-    message.uid = int(user_id)
-    message.region = region
-    return message.SerializeToString()
-
-def create_protobuf_for_profile_check(uid):
-    message = uid_generator_pb2.uid_generator()
-    message.krishna_ = int(uid)
-    message.teamXdarks = 1
-    return message.SerializeToString()
-
-def enc_profile_check_payload(uid):
-    protobuf_data = create_protobuf_for_profile_check(uid)
-    return encrypt_message(protobuf_data)
-
-# ---------- লাইক পাঠানো ----------
-async def send_single_like_request(session, encrypted_like_payload, token, url):
-    if not token:
-        return 999
-    edata = bytes.fromhex(encrypted_like_payload)
-    headers = {
-        'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
-        'Connection': "Keep-Alive",
-        'Accept-Encoding': "gzip",
-        'Authorization': f"Bearer {token}",
-        'Content-Type': "application/x-www-form-urlencoded",
-        'Expect': "100-continue",
-        'X-Unity-Version': "2018.4.11f1",
-        'X-GA': "v1 1",
-        'ReleaseVersion': "OB52"
-    }
-    try:
-        async with session.post(url, data=edata, headers=headers, timeout=10) as response:
-            return response.status
-    except:
-        return 997
-
-async def send_likes_with_token_list(session, uid, server_region, like_api_url, token_list):
-    if not token_list:
-        return 0
-    like_payload = create_protobuf_message(uid, server_region)
-    encrypted = encrypt_message(like_payload)
-    tasks = [send_single_like_request(session, encrypted, token, like_api_url) for token in token_list]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    return sum(1 for r in results if isinstance(r, int) and r == 200)
-
-def run_send_likes(uid, server_region, like_api_url, token_list):
-    async def _run():
-        async with aiohttp.ClientSession() as session:
-            return await send_likes_with_token_list(session, uid, server_region, like_api_url, token_list)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_run())
-    finally:
-        loop.close()
-
-# ---------- প্রোফাইল চেক ----------
-async def make_profile_check_request_async(session, encrypted_payload, server_name, token):
-    if not token:
-        return None
-    if server_name == "IND":
-        url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
-    elif server_name in {"BR", "US", "SAC", "NA"}:
-        url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
-    else:
-        url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
-    edata = bytes.fromhex(encrypted_payload)
-    headers = {
-        'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_Z01QD Build/PI)",
-        'Connection': "Keep-Alive",
-        'Accept-Encoding': "gzip",
-        'Authorization': f"Bearer {token}",
-        'Content-Type': "application/x-www-form-urlencoded",
-        'Expect': "100-continue",
-        'X-Unity-Version': "2018.4.11f1",
-        'X-GA': "v1 1",
-        'ReleaseVersion': "OB52"
-    }
-    try:
-        async with session.post(url, data=edata, headers=headers, timeout=10) as response:
-            if response.status != 200:
-                return None
-            binary_data = await response.read()
-            items = like_count_pb2.Info()
-            items.ParseFromString(binary_data)
-            return items
-    except:
-        return None
-
-async def get_profile_info_async(session, uid, server_name, token):
-    encrypted = enc_profile_check_payload(uid)
-    info = await make_profile_check_request_async(session, encrypted, server_name, token)
-    if info and hasattr(info, 'AccountInfo'):
-        likes = int(info.AccountInfo.Likes)
-        nickname = str(info.AccountInfo.PlayerNickname) if info.AccountInfo.PlayerNickname else "N/A"
-        uid_from = int(info.AccountInfo.UID) if info.AccountInfo.UID else int(uid)
-        return likes, nickname, uid_from
-    return None, None, None
-
-def run_profile_check(uid, server_name, token):
-    async def _run():
-        async with aiohttp.ClientSession() as session:
-            return await get_profile_info_async(session, uid, server_name, token)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(_run())
-    finally:
-        loop.close()
-
-# ---------- Flask অ্যাপ ----------
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
-init_db()
 
-# ==========================================================
-# CUTE & COLORFUL HTML TEMPLATES
-# ==========================================================
-
-INDEX_HTML = """
-<!DOCTYPE html>
-<html lang="bn">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🌸 ARIYAN FF LIKES 🌸</title>
-    <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600;700&family=Baloo+Da+2:wght@500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Quicksand', 'Baloo Da 2', sans-serif;
-            background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 99%, #fecfef 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-            overflow-x: hidden;
-        }
-        /* Cute floating bubbles background */
-        .bubble {
-            position: absolute;
-            background: rgba(255, 255, 255, 0.4);
-            border-radius: 50%;
-            animation: float 8s infinite ease-in-out;
-            z-index: 0;
-        }
-        @keyframes float {
-            0%, 100% { transform: translateY(0) scale(1); }
-            50% { transform: translateY(-20px) scale(1.1); }
-        }
+class SimpleAPI:
+    def __init__(self):
+        self.running = True
         
-        .container {
-            background: rgba(255, 255, 255, 0.9);
-            backdrop-filter: blur(10px);
-            max-width: 500px;
-            width: 100%;
-            border-radius: 30px;
-            padding: 40px 30px;
-            box-shadow: 0 15px 35px rgba(255, 105, 180, 0.2);
-            text-align: center;
-            position: relative;
-            z-index: 10;
-            border: 3px solid #fff;
-        }
-        .header h1 {
-            color: #ff6b81;
-            font-size: 2.5rem;
-            font-weight: 700;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 0px #ffeaa7;
-        }
-        .header p {
-            color: #7bed9f;
-            font-size: 1.1rem;
-            font-weight: 600;
-            margin-bottom: 30px;
-            background: #f1f2f6;
-            display: inline-block;
-            padding: 5px 15px;
-            border-radius: 20px;
-        }
-        .input-group { margin-bottom: 20px; text-align: left; }
-        .input-group label {
-            display: block;
-            color: #ff4757;
-            font-weight: 700;
-            margin-bottom: 8px;
-            font-size: 1rem;
-        }
-        input, select {
-            width: 100%;
-            padding: 15px;
-            border: 2px solid #ffeaa7;
-            border-radius: 20px;
-            font-size: 1rem;
-            font-family: 'Quicksand', sans-serif;
-            color: #2f3542;
-            background: #fff;
-            transition: all 0.3s;
-            outline: none;
-        }
-        input:focus, select:focus {
-            border-color: #ff6b81;
-            box-shadow: 0 0 15px rgba(255, 107, 129, 0.2);
-            transform: scale(1.02);
-        }
-        .btn-submit {
-            background: linear-gradient(45deg, #ff6b81, #ff7f50);
-            color: white;
-            border: none;
-            width: 100%;
-            padding: 15px;
-            border-radius: 20px;
-            font-size: 1.2rem;
-            font-weight: 700;
-            cursor: pointer;
-            transition: all 0.3s;
-            box-shadow: 0 5px 15px rgba(255, 107, 129, 0.4);
-            margin-top: 10px;
-        }
-        .btn-submit:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 8px 20px rgba(255, 107, 129, 0.6);
-        }
-        .btn-submit:active { transform: translateY(1px); }
-        .btn-submit.loading { opacity: 0.7; pointer-events: none; }
-        
-        .result-box {
-            margin-top: 25px;
-            background: #f1f2f6;
-            border-radius: 20px;
-            padding: 20px;
-            display: none;
-            animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            border: 2px dashed #ff6b81;
-        }
-        @keyframes popIn {
-            0% { transform: scale(0.8); opacity: 0; }
-            100% { transform: scale(1); opacity: 1; }
-        }
-        .result-item {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 10px;
-            border-bottom: 1px solid #dfe4ea;
-            padding-bottom: 5px;
-        }
-        .result-item span:first-child { font-weight: 700; color: #747d8c; }
-        .result-item span:last-child { font-weight: 700; color: #ff4757; }
-        
-        .footer { margin-top: 25px; }
-        .footer a {
-            color: #ff6b81;
-            text-decoration: none;
-            font-weight: 700;
-            font-size: 0.9rem;
-            border: 2px solid #ff6b81;
-            padding: 5px 15px;
-            border-radius: 20px;
-            transition: all 0.3s;
-        }
-        .footer a:hover {
-            background: #ff6b81;
-            color: white;
-        }
-    </style>
-</head>
-<body>
-    <!-- Background Bubbles -->
-    <div class="bubble" style="width: 80px; height: 80px; top: 10%; left: 10%;"></div>
-    <div class="bubble" style="width: 120px; height: 120px; top: 70%; left: 80%; animation-delay: 2s;"></div>
-    <div class="bubble" style="width: 50px; height: 50px; top: 40%; left: 90%; animation-delay: 4s;"></div>
-    <div class="bubble" style="width: 90px; height: 90px; top: 80%; left: 15%; animation-delay: 1s;"></div>
-
-    <div class="container">
-        <div class="header">
-            <h1>🌸 ARIYAN FF 🌸</h1>
-            <p>✨ Free Fire Auto Likes ✨</p>
-        </div>
-
-        <form id="likeForm">
-            <div class="input-group">
-                <label><i class="fas fa-gamepad"></i> তোমার গেম UID দাও</label>
-                <input type="number" name="uid" placeholder="Example: 123456789" required>
-            </div>
-            
-            <div class="input-group">
-                <label><i class="fas fa-globe"></i> সার্ভার সিলেক্ট করো</label>
-                <select name="server_name" required>
-                    <option value="BD">🇧🇩 Bangladesh</option>
-                    <option value="IND">🇮🇳 India</option>
-                    <option value="BR">🇧🇷 Brazil</option>
-                    <option value="US">🇺🇸 USA</option>
-                    <option value="SAC">🌍 SAC</option>
-                    <option value="NA">🌍 NA</option>
-                </select>
-            </div>
-            
-            <button type="submit" class="btn-submit" id="likeBtn">
-                <i class="fas fa-heart"></i> লাইক নাও! 💖
-            </button>
-        </form>
-
-        <div class="result-box" id="resultBox">
-            <h3 style="color: #2ed573; margin-bottom: 15px;" id="statusMsg">✅ সফল হয়েছে!</h3>
-            <div class="result-item"><span>নাম:</span> <span id="r_name">N/A</span></div>
-            <div class="result-item"><span>UID:</span> <span id="r_uid">N/A</span></div>
-            <div class="result-item"><span>আগের লাইক:</span> <span id="r_before">0</span></div>
-            <div class="result-item"><span>এখন লাইক:</span> <span id="r_after">0</span></div>
-            <div class="result-item"><span>প্লাস হয়েছে:</span> <span style="color: #2ed573; font-size: 1.2rem;" id="r_given">+0</span></div>
-        </div>
-
-        <div class="footer">
-            <p style="margin-bottom: 10px; color: #a4b0be; font-size: 0.9rem;">প্রতিদিন ১ বার করে নিতে পারবে! 🎀</p>
-            <a href="/admin/login"><i class="fas fa-lock"></i> Admin Panel</a>
-        </div>
-    </div>
-
-    <script>
-        document.getElementById('likeForm').onsubmit = async function(e) {
-            e.preventDefault();
-            const btn = document.getElementById('likeBtn');
-            const resultBox = document.getElementById('resultBox');
-            
-            btn.classList.add('loading');
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> লাইক যাচ্ছে...';
-            resultBox.style.display = 'none';
-            
-            const form = new FormData(this);
-            const params = new URLSearchParams(form).toString();
-            
-            try {
-                const res = await fetch('/like?' + params);
-                const data = await res.json();
+    def process_spam_command(self, target_id, duration_minutes=None):
+        try:
+            if not ChEck_Commande(target_id):
+                return {"status": "error", "message": "user_id Invalid"}
                 
-                document.getElementById('r_name').textContent = data.Nickname || 'N/A';
-                document.getElementById('r_uid').textContent = data.UID || 'N/A';
-                document.getElementById('r_before').textContent = data.Before || 'N/A';
-                document.getElementById('r_after').textContent = data.After || 'N/A';
-                document.getElementById('r_given').textContent = '+' + (data.Given || '0');
+            with active_spam_lock:
+                if target_id not in active_spam_targets:
+                    active_spam_targets[target_id] = {
+                        'active': True,
+                        'start_time': datetime.now(),
+                        'duration': duration_minutes
+                    }
+                    threading.Thread(target=spam_worker, args=(target_id, duration_minutes), daemon=True).start()
+                    message = f"Spam was started on the user: {target_id}"
+                    if duration_minutes:
+                        message += f" لمدة {duration_minutes} دقيقة (মিনিটের জন্য)"
+                    return {"status": "success", "message": message}
+                else:
+                    return {"status": "error", "message": f"Spam is already working on the user: {target_id}"}
+                    
+        except Exception as e:
+            return {"status": "error", "message": f"Error in handling the matter: {str(e)}"}
+            
+    def process_stop_command(self, target_id):
+        try:
+            with active_spam_lock:
+                if target_id in active_spam_targets:
+                    del active_spam_targets[target_id]
+                    message = f"Spam has been disabled for the user: {target_id}"
+                    return {"status": "success", "message": message}
+                else:
+                    return {"status": "error", "message": f"There is no active spam on user: {target_id}"}
+                    
+        except Exception as e:
+            return {"status": "error", "message": f"Error in handling the matter: {str(e)}"}
+            
+    def get_status(self):
+        try:
+            with active_spam_lock:
+                active_targets = list(active_spam_targets.keys())
+                active_targets_info = []
+                for target_id in active_targets:
+                    info = active_spam_targets[target_id]
+                    duration_info = ""
+                    if info['duration']:
+                        elapsed = datetime.now() - info['start_time']
+                        remaining = info['duration'] * 60 - elapsed.total_seconds()
+                        if remaining > 0:
+                            duration_info = f" ({int(remaining/60)} minute(s) remaining)"
+                    active_targets_info.append(f"{target_id}{duration_info}")
+                    
+            with connected_clients_lock:
+                accounts_count = len(connected_clients)
+                accounts_list = list(connected_clients.keys())
                 
-                const statusMsg = document.getElementById('statusMsg');
-                if (data.Status === 1) {
-                    statusMsg.innerHTML = '🎉 ওয়াও! লাইক সেন্ড হয়েছে!';
-                    statusMsg.style.color = '#2ed573';
-                } else if (data.Status === -1) {
-                    statusMsg.innerHTML = '⚠️ ' + data.Message;
-                    statusMsg.style.color = '#ff4757';
-                } else {
-                    statusMsg.innerHTML = '😢 ' + (data.Message || 'কিছু সমস্যা হয়েছে!');
-                    statusMsg.style.color = '#ffa502';
-                }
-                
-                resultBox.style.display = 'block';
-            } catch (error) {
-                alert('সার্ভার এরর! একটু পর ট্রাই করুন 🌸');
-            } finally {
-                btn.classList.remove('loading');
-                btn.innerHTML = '<i class="fas fa-heart"></i> লাইক নাও! 💖';
+            status_data = {
+                "active_targets_count": len(active_targets),
+                "active_targets": active_targets_info,
+                "connected_accounts_count": accounts_count,
+                "connected_accounts": accounts_list
             }
-        };
-    </script>
-</body>
-</html>
-"""
+            
+            return {"status": "success", "data": status_data}
+            
+        except Exception as e:
+            return {"status": "error", "message": f"Error in obtaining status: {str(e)}"}
 
-ADMIN_HTML = """
-<!DOCTYPE html>
-<html lang="bn">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🌸 Admin - ARIYAN 🌸</title>
-    <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
-    <style>
-        body {
-            font-family: 'Quicksand', sans-serif;
-            background: #f8a5c2;
-            padding: 20px;
-            color: #303952;
-        }
-        .admin-container {
-            max-width: 900px;
-            margin: 0 auto;
-            background: white;
-            padding: 30px;
-            border-radius: 30px;
-            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
-        }
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 3px dashed #f8a5c2;
-            padding-bottom: 15px;
-            margin-bottom: 25px;
-        }
-        .header h1 { color: #e15f41; font-weight: 700; }
-        .btn-logout {
-            background: #e15f41; color: white; padding: 8px 20px; border-radius: 20px; text-decoration: none; font-weight: 700;
-        }
-        .stats-box {
-            background: #f3a683; color: white; padding: 20px; border-radius: 20px; margin-bottom: 25px; font-size: 1.2rem; font-weight: 700; text-align: center;
-        }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
-        
-        .card { background: #fdf1f3; padding: 20px; border-radius: 20px; border: 2px solid #f8a5c2; }
-        .card h2 { color: #e15f41; margin-bottom: 15px; font-size: 1.3rem; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 10px; overflow: hidden; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #f8a5c2; }
-        th { background: #f8a5c2; color: white; }
-        
-        input { width: 100%; padding: 10px; margin-bottom: 10px; border: 2px solid #f8a5c2; border-radius: 10px; outline: none;}
-        .btn-add { background: #786fa6; color: white; border: none; padding: 10px; width: 100%; border-radius: 10px; font-weight: bold; cursor: pointer; }
-        .btn-del { background: #e15f41; color: white; text-decoration: none; padding: 4px 10px; border-radius: 10px; font-size: 0.8rem; }
-    </style>
-</head>
-<body>
-    <div class="admin-container">
-        <div class="header">
-            <h1>🌸 ARIYAN Admin Panel 🌸</h1>
-            <a href="/admin/logout" class="btn-logout"><i class="fas fa-sign-out-alt"></i> Logout</a>
-        </div>
-        
-        <div class="stats-box">
-            আজকে মোট লাইক নিয়েছে: {{ today_history|length }} জন ✨
-        </div>
-
-        <div class="grid">
-            <!-- Daily History Table -->
-            <div class="card">
-                <h2><i class="fas fa-history"></i> আজকের লাইক হিস্ট্রি</h2>
-                <div style="max-height: 400px; overflow-y: auto;">
-                    <table>
-                        <tr><th>UID</th><th>Server</th><th>Given</th><th>Time</th></tr>
-                        {% for row in today_history %}
-                        <tr>
-                            <td>{{ row[0] }}</td>
-                            <td>{{ row[1] }}</td>
-                            <td style="color:#2ed573; font-weight:bold;">+{{ row[2] }}</td>
-                            <td style="font-size: 0.8rem;">{{ row[3][11:19] }}</td>
-                        </tr>
-                        {% else %}
-                        <tr><td colspan="4" style="text-align:center;">আজকে কেউ লাইক নেয়নি 😢</td></tr>
-                        {% endfor %}
-                    </table>
-                </div>
-            </div>
-
-            <!-- Bot Account Manager -->
-            <div class="card">
-                <h2><i class="fas fa-robot"></i> বট একাউন্ট (Guest UID/Pass)</h2>
-                <p style="font-size: 0.9rem; color: #574b90; margin-bottom: 10px;">এখানে যা সেভ করবেন তা অটোমেটিক <b>account.txt</b> এ সেভ হবে।</p>
-                <form action="/admin/add_bot" method="post" style="margin-bottom: 20px;">
-                    <input type="number" name="uid" placeholder="Bot UID (Ex: 12345678)" required>
-                    <input type="text" name="password" placeholder="Bot Password" required>
-                    <button type="submit" class="btn-add"><i class="fas fa-plus"></i> সেভ করুন</button>
-                </form>
+def spam_worker(target_id, duration_minutes=None):
+    print(f"Start spam on target: {target_id}" + (f" for {duration_minutes} minute(s)" if duration_minutes else ""))
+    
+    start_time = datetime.now()
+    
+    while True:
+        with active_spam_lock:
+            # যদি টার্গেট রিমুভ হয়ে যায় (স্টপ কমান্ডের কারণে)
+            if target_id not in active_spam_targets:
+                print(f"️The spam stopped at the target: {target_id}")
+                break
                 
-                <div style="max-height: 250px; overflow-y: auto;">
-                    <table>
-                        <tr><th>UID</th><th>Password</th><th>Action</th></tr>
-                        {% for bot in bots %}
-                        <tr>
-                            <td>{{ bot[1] }}</td>
-                            <td>{{ bot[2][:4] }}***</td>
-                            <td><a href="/admin/del_bot/{{ bot[0] }}" class="btn-del">Delete</a></td>
-                        </tr>
-                        {% endfor %}
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-"""
+            # সময় শেষ হয়েছে কিনা চেক করা
+            if duration_minutes:
+                elapsed = datetime.now() - start_time
+                if elapsed.total_seconds() >= duration_minutes * 60:
+                    print(f"The spam period ({duration_minutes} min) on the target has ended: {target_id}")
+                    del active_spam_targets[target_id]
+                    break
+                
+        try:
+            send_spam_from_all_accounts(target_id)
+            time.sleep(0.1)  
+        except Exception as e:
+            print(f"Spam error on {target_id}: {e}")
+            time.sleep(1)
 
-LOGIN_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Admin Login 🌸</title>
-    <style>
-        body { font-family: 'Quicksand', sans-serif; background: #f8a5c2; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        .box { background: white; padding: 40px; border-radius: 30px; text-align: center; box-shadow: 0 10px 20px rgba(0,0,0,0.1); width: 300px; }
-        input { width: 90%; padding: 10px; margin: 10px 0; border: 2px solid #f8a5c2; border-radius: 15px; outline: none; }
-        button { background: #e15f41; color: white; border: none; padding: 10px 20px; border-radius: 15px; font-weight: bold; cursor: pointer; width: 100%; }
-    </style>
-</head>
-<body>
-    <div class="box">
-        <h2 style="color: #e15f41;">🌸 ARIYAN Admin 🌸</h2>
-        <form method="post">
-            <input type="text" name="username" placeholder="Username" required>
-            <input type="password" name="password" placeholder="Password" required>
-            <button type="submit">LOGIN</button>
-        </form>
-    </div>
-</body>
-</html>
-"""
+def send_spam_from_all_accounts(target_id):
+    with connected_clients_lock:
+        for account_id, client in connected_clients.items():
+            try:
+                if (hasattr(client, 'CliEnts2') and client.CliEnts2 and 
+                    hasattr(client, 'key') and client.key and 
+                    hasattr(client, 'iv') and client.iv):
+                    
+                    try:
+                        client.CliEnts2.send(openroom(client.key, client.iv))
+                        # print(f"Open the room from the account: {account_id}") # Optional logging
+                    except Exception as e:
+                        pass
+                    
+                    for i in range(10):  
+                        try:
+                            client.CliEnts2.send(spmroom(client.key, client.iv, target_id))
+                        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                            break
+                        except Exception as e:
+                            break
+            except Exception as e:
+                pass
 
-# ==========================================================
-# FLASK ROUTES
-# ==========================================================
+api = SimpleAPI()
+
+@app.route('/spam', methods=['GET'])
+def start_spam():
+    target_id = request.args.get('user_id')
+    duration = request.args.get('duration', type=int)
+    
+    if not target_id:
+        return jsonify({"status": "error", "message": "Please enter user_id"})
+    
+    # === ডিফল্ট এবং সর্বোচ্চ ৫ মিনিটের লজিক ===
+    if duration is None:
+        duration = 1  # ডিফল্ট ১ মিনিট
+        
+    if duration > 5:
+        duration = 5  # সর্বোচ্চ ৫ মিনিট
+    elif duration <= 0:
+        return jsonify({"status": "error", "message": "Duration must be at least 1 minute"})
+    # ==========================================
+
+    result = api.process_spam_command(target_id, duration)
+    return jsonify(result)
+
+@app.route('/stop', methods=['GET'])
+def stop_spam():
+    target_id = request.args.get('user_id')
+    
+    if not target_id:
+        return jsonify({"status": "error", "message": "Please enter the user_id"})
+    
+    result = api.process_stop_command(target_id)
+    return jsonify(result)
+
+@app.route('/status', methods=['GET'])
+def get_status():
+    result = api.get_status()
+    return jsonify(result)
+
+@app.route('/accounts', methods=['GET'])
+def get_accounts():
+    try:
+        with connected_clients_lock:
+            accounts_count = len(connected_clients)
+            accounts_list = list(connected_clients.keys())
+            
+        accounts_data = {
+            "connected_accounts_count": accounts_count,
+            "connected_accounts": accounts_list
+        }
+        
+        return jsonify({"status": "success", "data": accounts_data})
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error: {str(e)}"})
 
 @app.route('/')
-def index():
-    return render_template_string(INDEX_HTML)
+def home():
+    return """
+    <h1> نظام إدارة السبام (الإصدار المحدث)</h1>
+    <p>Endpoints المتاحة:</p>
+    <ul>
+        <li><strong>بدء السبام:</strong> GET /spam?user_id=123456789&amp;duration=5 (সর্বোচ্চ ৫ মিনিট)</li>
+        <li><strong>إيقاف السبام:</strong> GET /stop?user_id=123456789</li>
+        <li><strong>حالة النظام:</strong> GET /status</li>
+        <li><strong>الحسابات المتصلة:</strong> GET /accounts</li>
+    </ul>
+    """
 
-@app.route('/like', methods=['GET'])
-def handle_like():
-    uid = request.args.get("uid", "").strip()
-    server = request.args.get("server_name", "").strip().upper()
+def run_api():
+    print("🌐 API Started on Port 5000...")
+    app.run(host='0.0.0.0', port=5000, debug=False)
+
+def AuTo_ResTartinG():
+    time.sleep(6 * 60 * 60)
+    print('\n - AuTo ResTartinG The BoT ... ! ')
+    try:
+        p = psutil.Process(os.getpid())
+        for handler in p.open_files():
+            try: os.close(handler.fd)
+            except: pass
+        for conn in p.net_connections():
+            try:
+                if hasattr(conn, 'fd'): os.close(conn.fd)
+            except: pass
+    except Exception as e:
+        print(" - Virtual App Env: Bypassing psutil checks") # Virtual Apps e crash rodh korar jnno
+        
+    sys.path.append(os.path.dirname(os.path.abspath(sys.argv[0])))
+    python = sys.executable
+    try:
+        os.execl(python, python, *sys.argv)
+    except Exception as e:
+        os._exit(0)
+       
+def ResTarT_BoT():
+    print('\n - ResTartinG The BoT ... ! ')
+    try:
+        p = psutil.Process(os.getpid())
+        for handler in p.open_files():
+            try: os.close(handler.fd)
+            except: pass           
+        for conn in p.net_connections():
+            try: conn.close()
+            except: pass
+    except: pass
     
-    if not uid or not server:
-        return jsonify({"Status": -2, "Message": "UID বা সার্ভার দেওয়া হয়নি!"})
+    sys.path.append(os.path.dirname(os.path.abspath(sys.argv[0])))
+    python = sys.executable
+    try:
+        os.execl(python, python, *sys.argv)
+    except:
+        os._exit(0)
 
-    # ১. চেক করুন ইউজার আজকে লাইক নিয়েছে কিনা
-    if not check_daily_limit(uid):
-        return jsonify({
-            "Status": -1,
-            "Message": "তুমি আজকে লাইক নিয়ে নিয়েছো! কালকে আবার এসো 🌸",
-            "UID": uid, "Before": "N/A", "After": "N/A", "Given": 0
-        })
+def GeT_Time(timestamp):
+    last_login = datetime.fromtimestamp(timestamp)
+    now = datetime.now()
+    diff = now - last_login   
+    d = diff.days
+    h , rem = divmod(diff.seconds, 3600)
+    m , s = divmod(rem, 60)    
+    return d, h, m, s
 
-    # ২. লোকাল ফাইল থেকে টোকেন লোড করুন
-    tokens = load_tokens_from_file(server)
-    if not tokens:
-        return jsonify({
-            "Status": -2, 
-            "Message": f"আমাদের সিস্টেমে {server} সার্ভারের টোকেন শেষ! অ্যাডমিনকে জানান 😢"
-        })
-
-    # ৩. আগের লাইক চেক
-    before_likes, nickname, uid_from = run_profile_check(uid, server, tokens[0])
-    if before_likes is None:
-        return jsonify({"Status": -2, "Message": "UID টি ভুল অথবা গেম সার্ভার ডাউন!"})
-
-    # ৪. লাইক পাঠানো
-    if server == "IND":
-        like_api_url = "https://client.ind.freefiremobile.com/LikeProfile"
-    elif server in {"BR", "US", "SAC", "NA"}:
-        like_api_url = "https://client.us.freefiremobile.com/LikeProfile"
-    else:
-        like_api_url = "https://clientbp.ggblueshark.com/LikeProfile"
-
-    success_count = run_send_likes(uid, server, like_api_url, tokens)
-
-    # ৫. পরের লাইক চেক
-    after_likes, _, _ = run_profile_check(uid, server, tokens[0])
-    if after_likes is None:
-        after_likes = before_likes + success_count # Fallback calculation
-
-    increment = after_likes - before_likes
-
-    if increment > 0:
-        # সফল হলে ডেইলি লিমিটে যোগ করুন এবং হিস্ট্রিতে সেভ করুন
-        update_daily_limit(uid)
-        log_like_history(uid, server, increment)
-        status = 1
-    else:
-        status = 0
-
-    return jsonify({
-        "Nickname": nickname,
-        "UID": uid_from,
-        "Before": before_likes,
-        "After": after_likes,
-        "Given": increment,
-        "Status": status,
-        "Message": ""
-    })
-
-# ========== ADMIN ROUTES ==========
-
-@app.route('/admin/login', methods=['GET', 'POST'])
-def admin_login():
-    if request.method == 'POST':
-        if request.form['username'] == ADMIN_USERNAME and request.form['password'] == ADMIN_PASSWORD:
-            session['admin'] = True
-            return redirect(url_for('admin_panel'))
-        return "ভুল ইউজারনেম বা পাসওয়ার্ড ❌", 401
-    return render_template_string(LOGIN_HTML)
-
-@app.route('/admin/logout')
-def admin_logout():
-    session.pop('admin', None)
-    return redirect(url_for('index'))
-
-@app.route('/admin')
-def admin_panel():
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
+def Time_En_Ar(t): 
+    return ' '.join(t.replace("Day","يوم").replace("Hour","ساعة").replace("Min","دقيقة").replace("Sec","ثانية").split(" - "))
     
-    today_history = get_today_history()
-    bots = get_all_bots()
-    return render_template_string(ADMIN_HTML, today_history=today_history, bots=bots)
+Thread(target = AuTo_ResTartinG , daemon = True).start()
 
-@app.route('/admin/add_bot', methods=['POST'])
-def admin_add_bot():
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
-    add_bot_account(request.form['uid'], request.form['password'])
-    return redirect(url_for('admin_panel'))
+ACCOUNTS = []
 
-@app.route('/admin/del_bot/<int:bot_id>')
-def admin_del_bot(bot_id):
-    if not session.get('admin'):
-        return redirect(url_for('admin_login'))
-    delete_bot(bot_id)
-    return redirect(url_for('admin_panel'))
+def load_accounts_from_file(filename="accs.txt"):
+    accounts = []
+    try:
+        with open(filename, "r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if line and not line.startswith("#"):  
+                    if ":" in line:
+                        parts = line.split(":")
+                        if len(parts) >= 2:
+                            account_id = parts[0].strip()
+                            password = parts[1].strip()
+                            accounts.append({'id': account_id, 'password': password})
+                    else:
+                        accounts.append({'id': line.strip(), 'password': ''})
+        print(f"Loaded {len(accounts)} accounts from {filename}")
+    except FileNotFoundError:
+        print(f"file {filename} unavailable!")
+    except Exception as e:
+        print(f"An error occurred while reading the file: {e}")
+    
+    return accounts
 
-if __name__ == '__main__':
-    # স্টার্ট হওয়ার সময় ফোল্ডার ও ডাটাবেস চেক করে নিবে
-    init_db()
-    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+ACCOUNTS = load_accounts_from_file()
+            
+class FF_CLient():
+    def __init__(self, id, password):
+        self.id = id
+        self.password = password
+        self.key = None
+        self.iv = None
+        self.Get_FiNal_ToKen_0115()     
+            
+    def Connect_SerVer_OnLine(self , Token , tok , host , port , key , iv , host2 , port2):
+            try:
+                self.AutH_ToKen_0115 = tok    
+                self.CliEnts2 = socket.create_connection((host2 , int(port2)))
+                self.CliEnts2.send(bytes.fromhex(self.AutH_ToKen_0115))                  
+            except:pass        
+            while True:
+                try:
+                    self.DaTa2 = self.CliEnts2.recv(99999)
+                    if '0500' in self.DaTa2.hex()[0:4] and len(self.DaTa2.hex()) > 30:	         	    	    
+                            self.packet = json.loads(DeCode_PackEt(f'08{self.DaTa2.hex().split("08", 1)[1]}'))
+                            self.AutH = self.packet['5']['data']['7']['data']
+                except:pass    	
+                                                            
+    def Connect_SerVer(self , Token , tok , host , port , key , iv , host2 , port2):
+            self.AutH_ToKen_0115 = tok    
+            self.CliEnts = socket.create_connection((host , int(port)))
+            self.CliEnts.send(bytes.fromhex(self.AutH_ToKen_0115))  
+            self.DaTa = self.CliEnts.recv(1024)          	        
+            threading.Thread(target=self.Connect_SerVer_OnLine, args=(Token , tok , host , port , key , iv , host2 , port2)).start()
+            self.Exemple = xMsGFixinG('12345678')
+            
+            self.key = key
+            self.iv = iv
+            
+            with connected_clients_lock:
+                connected_clients[self.id] = self
+                print(f" Account registered {self.id}. Total: {len(connected_clients)}")
+            
+            while True:      
+                try:
+                    self.DaTa = self.CliEnts.recv(1024)   
+                    if len(self.DaTa) == 0 or (hasattr(self, 'DaTa2') and len(self.DaTa2) == 0):	            		
+                        try:            		    
+                            self.CliEnts.close()
+                            if hasattr(self, 'CliEnts2'):
+                                self.CliEnts2.close()
+                            self.Connect_SerVer(Token , tok , host , port , key , iv , host2 , port2)                    		                    
+                        except:
+                            try:
+                                self.CliEnts.close()
+                                if hasattr(self, 'CliEnts2'):
+                                    self.CliEnts2.close()
+                                self.Connect_SerVer(Token , tok , host , port , key , iv , host2 , port2)
+                            except:
+                                self.CliEnts.close()
+                                if hasattr(self, 'CliEnts2'):
+                                    self.CliEnts2.close()
+                                ResTarT_BoT()	            
+                except Exception as e:
+                    try:
+                        self.CliEnts.close()
+                        if hasattr(self, 'CliEnts2'):
+                            self.CliEnts2.close()
+                    except:
+                        pass
+                    self.Connect_SerVer(Token , tok , host , port , key , iv , host2 , port2)
+                                    
+    def GeT_Key_Iv(self , serialized_data):
+        my_message = xKEys.MyMessage()
+        my_message.ParseFromString(serialized_data)
+        timestamp , key , iv = my_message.field21 , my_message.field22 , my_message.field23
+        timestamp_obj = Timestamp()
+        timestamp_obj.FromNanoseconds(timestamp)
+        timestamp_seconds = timestamp_obj.seconds
+        timestamp_nanos = timestamp_obj.nanos
+        combined_timestamp = timestamp_seconds * 1_000_000_000 + timestamp_nanos
+        return combined_timestamp , key , iv    
+
+    def Guest_GeneRaTe(self , uid , password):
+        self.url = "https://100067.connect.garena.com/oauth/guest/token/grant"
+        self.headers = {"Host": "100067.connect.garena.com","User-Agent": "GarenaMSDK/4.0.19P4(G011A ;Android 9;en;US;)","Content-Type": "application/x-www-form-urlencoded","Accept-Encoding": "gzip, deflate, br","Connection": "close"}
+        self.dataa = {"uid": f"{uid}","password": f"{password}","response_type": "token","client_type": "2","client_secret": "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3","client_id": "100067"}
+        try:
+            self.response = requests.post(self.url, headers=self.headers, data=self.dataa).json()
+            self.Access_ToKen , self.Access_Uid = self.response['access_token'] , self.response['open_id']
+            time.sleep(0.2)
+            print(f' - Uid : {uid} Logged in.')
+            return self.ToKen_GeneRaTe(self.Access_ToKen , self.Access_Uid)
+        except Exception as e: 
+            time.sleep(10)
+            return self.Guest_GeneRaTe(uid, password)
+                                        
+    def GeT_LoGin_PorTs(self , JwT_ToKen , PayLoad):
+        self.UrL = 'https://clientbp.ggblueshark.com/GetLoginData'
+        self.HeadErs = {
+            'Expect': '100-continue',
+            'Authorization': f'Bearer {JwT_ToKen}',
+            'X-Unity-Version': '2022.3.47f1',
+            'X-GA': 'v1 1',
+            'ReleaseVersion': 'OB52',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'UnityPlayer/2022.3.47f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)',
+            'Connection': 'close',
+            'Accept-Encoding': 'deflate, gzip'}        
+        try:
+                self.Res = requests.post(self.UrL , headers=self.HeadErs , data=PayLoad , verify=False)
+                self.BesTo_data = json.loads(DeCode_PackEt(self.Res.content.hex()))  
+                address , address2 = self.BesTo_data['32']['data'] , self.BesTo_data['14']['data'] 
+                ip , ip2 = address[:len(address) - 6] , address2[:len(address) - 6]
+                port , port2 = address[len(address) - 5:] , address2[len(address2) - 5:]             
+                return ip , port , ip2 , port2          
+        except requests.RequestException as e:
+                pass
+        return None, None, None, None
+        
+    def ToKen_GeneRaTe(self , Access_ToKen , Access_Uid):
+        self.UrL = "https://loginbp.ggwhitehawk.com/MajorLogin"
+        self.HeadErs = {
+            'X-Unity-Version': '2022.3.47f1',
+            'ReleaseVersion': 'OB52',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-GA': 'v1 1',
+            'Content-Length': '928',
+            'User-Agent': 'UnityPlayer/2022.3.47f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)',
+            'Host': 'loginbp.ggwhitehawk.com',
+            'Connection': 'Keep-Alive',
+            'Accept-Encoding': 'deflate, gzip'}   
+        
+        self.dT = bytes.fromhex('1a13323032362d30322d31312032313a34313a3035220966726565206669726528013a07312e3132302e31423a416e64726f6964204f532039202f204150492d32382028505133422e3139303830312e31303130313834362f47393635305a48553241524336294a0848616e6468656c645207566572697a6f6e5a045749464960800f68b80872033238307a2141524d3634204650204153494d442041455320564d48207c2032383635207c20348001bb178a010f416472656e6f2028544d29203634309201134f70656e474c20455320332e312076312e34369a012b476f6f676c657c33346137646364662d613764352d346362362d386437652d336230653434386130633537a2010d3232332e3139312e35312e3839aa0102656eb201203433303632343537393364653836646134323561353263616164663231656564ba010134c2010848616e6468656c64ca010430374051ea014034653739616666653331343134393031353434656161626562633437303537333866653638336139326464346335656533646233333636326232653936363466f00101ca0207566572697a6f6ed2020457494649ca03203734323862323533646566633136343031386336303461316562626665626466e0038b9b02e803e7f401f003d713f803bf058004b2c301880484d0019004e0810298048b9b02c80403d2043f2f646174612f6170702f636f6d2e6474732e667265656669726574682d59504b4d386a484577414a6c68706d68446876354d513d3d2f6c69622f61726d3634e00401ea045f35623839326161616264363838653537316636383830353331313861313632627c2f646174612f6170702f636f6d2e6474732e667265656669726574682d59504b4d386a484577414a6c68706d68446876354d513d3d2f626173652e61706bf00403f804028a050236349a050a32303139313138363935b205094f70656e474c455332b805ff7fc00504ca0530467751565467555058315561556c6c4444776357435242705741554f556773764131736e576c42614f316b4659673d3de005fc69ea0507616e64726f6964f2055c4b71734854796d77352f354742323359476e6955594e322f71343747415472713765466552617466304e6b774c4b454d5130504b35424b456b37326450666c4178556c454269723656746579383358714635393371736c386877593df805b9db068806019006019a060134a2060134')
+        
+        self.dT = self.dT.replace(b'2025-07-30 14:11:20' , str(datetime.now())[:-7].encode())        
+        self.dT = self.dT.replace(b'4e79affe31414901544eaabebc4705738fe683a92dd4c5ee3db33662b2e9664f' , Access_ToKen.encode())
+        self.dT = self.dT.replace(b'4306245793de86da425a52caadf21eed' , Access_Uid.encode())
+        
+        try:
+            hex_data = self.dT.hex()
+            encoded_data = EnC_AEs(hex_data)
+            if not all(c in '0123456789abcdefABCDEF' for c in encoded_data):
+                encoded_data = hex_data  
+            self.PaYload = bytes.fromhex(encoded_data)
+        except Exception as e:
+            self.PaYload = self.dT
+        
+        self.ResPonse = requests.post(self.UrL, headers = self.HeadErs ,  data = self.PaYload , verify=False)        
+        if self.ResPonse.status_code == 200 and len(self.ResPonse.text) > 10:
+            try:
+                self.BesTo_data = json.loads(DeCode_PackEt(self.ResPonse.content.hex()))
+                self.JwT_ToKen = self.BesTo_data['8']['data']           
+                self.combined_timestamp , self.key , self.iv = self.GeT_Key_Iv(self.ResPonse.content)
+                ip , port , ip2 , port2 = self.GeT_LoGin_PorTs(self.JwT_ToKen , self.PaYload)            
+                return self.JwT_ToKen , self.key , self.iv, self.combined_timestamp , ip , port , ip2 , port2
+            except Exception as e:
+                time.sleep(5)
+                return self.ToKen_GeneRaTe(Access_ToKen, Access_Uid)
+        else:
+            time.sleep(5)
+            return self.ToKen_GeneRaTe(Access_ToKen, Access_Uid)
+      
+    def Get_FiNal_ToKen_0115(self):
+        try:
+            result = self.Guest_GeneRaTe(self.id , self.password)
+            if not result:
+                time.sleep(5)
+                return self.Get_FiNal_ToKen_0115()
+                
+            token , key , iv , Timestamp , ip , port , ip2 , port2 = result
+            
+            if not all([ip, port, ip2, port2]):
+                time.sleep(5)
+                return self.Get_FiNal_ToKen_0115()
+                
+            self.JwT_ToKen = token        
+            try:
+                self.AfTer_DeC_JwT = jwt.decode(token, options={"verify_signature": False})
+                self.AccounT_Uid = self.AfTer_DeC_JwT.get('account_id')
+                self.EncoDed_AccounT = hex(self.AccounT_Uid)[2:]
+                self.HeX_VaLue = DecodE_HeX(Timestamp)
+                self.TimE_HEx = self.HeX_VaLue
+                self.JwT_ToKen_ = token.encode().hex()
+            except Exception as e:
+                time.sleep(5)
+                return self.Get_FiNal_ToKen_0115()
+                
+            try:
+                self.Header = hex(len(EnC_PacKeT(self.JwT_ToKen_, key, iv)) // 2)[2:]
+                length = len(self.EncoDed_AccounT)
+                self.__ = '00000000'
+                if length == 9: self.__ = '0000000'
+                elif length == 8: self.__ = '00000000'
+                elif length == 10: self.__ = '000000'
+                elif length == 7: self.__ = '000000000'
+                self.Header = f'0115{self.__}{self.EncoDed_AccounT}{self.TimE_HEx}00000{self.Header}'
+                self.FiNal_ToKen_0115 = self.Header + EnC_PacKeT(self.JwT_ToKen_ , key , iv)
+            except Exception as e:
+                time.sleep(5)
+                return self.Get_FiNal_ToKen_0115()
+                
+            self.AutH_ToKen = self.FiNal_ToKen_0115
+            self.Connect_SerVer(self.JwT_ToKen , self.AutH_ToKen , ip , port , key , iv , ip2 , port2)        
+            return self.AutH_ToKen , key , iv
+            
+        except Exception as e:
+            time.sleep(10)
+            return self.Get_FiNal_ToKen_0115()
+
+def start_account(account):
+    try:
+        FF_CLient(account['id'], account['password'])
+    except Exception as e:
+        time.sleep(5)
+        start_account(account)  
+
+def StarT_SerVer():
+    api_thread = threading.Thread(target=run_api, daemon=True)
+    api_thread.start()
+    
+    threads = []
+    
+    for account in ACCOUNTS:
+        thread = threading.Thread(target=start_account, args=(account,))
+        thread.daemon = True
+        threads.append(thread)
+        thread.start()
+        time.sleep(3)  
+    
+    for thread in threads:
+        thread.join()
+  
+StarT_SerVer()
