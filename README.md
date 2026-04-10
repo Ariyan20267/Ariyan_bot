@@ -1,4 +1,4 @@
-# 💖💖💖 ARIYAN BOT 💖💖💖
+# 💖💖💖 NAIM BOT 💖💖💖
 # 🔥🔥 FREE FIRE AUTOMATION BOT 🔥🔥
 
 <p align="center">
